@@ -19,7 +19,7 @@ if str(LEGAL_RAG_DIR) not in sys.path:
 load_dotenv(BACKEND_DIR / ".env")
 load_dotenv(LEGAL_RAG_DIR / ".env")
 
-# --- Import rag_service robustly (ללא from-import כדי שה-IDE לא יסמן) ---
+# --- Import rag_service robustly ---
 try:
     rs = importlib.import_module("rag_service")
 except ModuleNotFoundError:
@@ -44,15 +44,29 @@ if TYPE_CHECKING:
     answer_question: Callable[[str, List[dict] | None, int], Tuple[str, List[dict]]]
     ensure_index_built: Callable[[bool], None]
 
+# --------- CORS (מאפשר לדפדפן לקרוא ישירות ל־Render) ----------
+def _env_list(name: str, default: str = "") -> List[str]:
+    v = os.getenv(name, default)
+    return [s.strip() for s in v.split(",") if s.strip()]
+
+# אפשר להגדיר ב־Render (Environment Variables) משתנה: ALLOWED_ORIGINS
+# לדוגמה: https://<your-vercel-app>.vercel.app,http://localhost:3000
+ALLOWED_ORIGINS = _env_list(
+    "ALLOWED_ORIGINS",
+    "http://localhost:3000,https://<your-vercel-app>.vercel.app"
+)
+
 # --- FastAPI app ---
 app = FastAPI(title="Legal-RAG Backend", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,           # אין שימוש בעוגיות, אבל נשאיר True למקרה עתידי
+    allow_methods=["POST", "OPTIONS"],
     allow_headers=["*"],
 )
+
+# --------- Models ----------
 class HistoryMsg(BaseModel):
     role: Literal["user", "assistant"]
     content: str
@@ -62,11 +76,16 @@ class ChatRequest(BaseModel):
     history: Optional[List[HistoryMsg]] = None
     top_k: int = 4
 
+# --------- Health ---------
 @app.get("/health")
 def health():
     return {"ok": True}
 
-# אפשר להשאיר כך; האזהרה על on_event היא דפרקציה בלבד
+@app.get("/healthz")
+def healthz():
+    return {"ok": True}
+
+# --------- Startup warmup (בניית אינדקס) ---------
 @app.on_event("startup")
 def _warmup():
     try:
@@ -76,10 +95,15 @@ def _warmup():
     except Exception as e:
         print("[startup] Index build failed:", repr(e))
 
+# --------- API ---------
 @app.post("/chat", response_class=PlainTextResponse)
 def chat(req: ChatRequest):
     try:
-        text, _ = answer_question(req.prompt, [m.model_dump() for m in (req.history or [])], req.top_k)
+        text, _ = answer_question(
+            req.prompt,
+            [m.model_dump() for m in (req.history or [])],
+            req.top_k
+        )
         return text
     except Exception as e:
         traceback.print_exc()
@@ -88,7 +112,11 @@ def chat(req: ChatRequest):
 @app.post("/chat_json")
 def chat_json(req: ChatRequest):
     try:
-        text, sources = answer_question(req.prompt, [m.model_dump() for m in (req.history or [])], req.top_k)
+        text, sources = answer_question(
+            req.prompt,
+            [m.model_dump() for m in (req.history or [])],
+            req.top_k
+        )
         return JSONResponse({"text": text, "sources": sources})
     except Exception as e:
         traceback.print_exc()
